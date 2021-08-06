@@ -1,11 +1,12 @@
 /**
- * Written by Thomas Roth - code@stacksmashing.net
+ * Copyright (C) 2021, Mate Kukri <km@mkukri.xyz>
+ * Based on "pico-serprog" by Thomas Roth <code@stacksmashing.net>
  * 
  * Licensed under GPLv3
- * 
+ *
  * Based on the spi_flash pico-example, which is:
  *  Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
- * Also based on stm32-vserprog: 
+ * Also based on stm32-vserprog:
  *  https://github.com/dword1511/stm32-vserprog
  * 
  */
@@ -16,12 +17,13 @@
 #include "pio/pio_spi.h"
 #include "spi.h"
 
-#define PIN_MISO 1
-#define PIN_MOSI 13
-#define PIN_SCK 12
-#define PIN_CS 9
-#define BUS_SPI         (1 << 3)
-#define S_SUPPORTED_BUS   BUS_SPI
+#define PIN_CS      2
+#define PIN_MISO    3
+#define PIN_MOSI    4
+#define PIN_SCK     5
+
+#define S_SUPPORTED_BUS (1 << 3)    // BUS_SPI
+
 #define S_CMD_MAP ( \
   (1 << S_CMD_NOP)       | \
   (1 << S_CMD_Q_IFACE)   | \
@@ -37,38 +39,45 @@
 )
 
 
-static inline void cs_select(uint cs_pin) {
+static inline void cs_select(uint cs_pin)
+{
     asm volatile("nop \n nop \n nop"); // FIXME
     gpio_put(cs_pin, 0);
     asm volatile("nop \n nop \n nop"); // FIXME
 }
 
-static inline void cs_deselect(uint cs_pin) {
+static inline void cs_deselect(uint cs_pin)
+{
     asm volatile("nop \n nop \n nop"); // FIXME
     gpio_put(cs_pin, 1);
     asm volatile("nop \n nop \n nop"); // FIXME
 }
 
-uint32_t getu24() {
-    uint32_t c1 = getchar();
-    uint32_t c2 = getchar();
-    uint32_t c3 = getchar();
-    return c1 | (c2<<8) | (c3<<16);
+static inline void readbytes(uint8_t *b, uint32_t len)
+{
+    fread(b, len, 1, stdin);
 }
 
-void putu32(uint32_t d) {
-    char buf[4];
-    memcpy(buf, &d, 4);
-    putchar(buf[0]);
-    putchar(buf[1]);
-    putchar(buf[2]);
-    putchar(buf[3]);
+static inline uint32_t getu24()
+{
+    uint8_t buf[3];
+    fread(buf, sizeof buf, 1, stdin);
+    return (uint32_t) buf[0]
+            | ((uint32_t) buf[1] << 8)
+            | ((uint32_t) buf[2] << 16);
 }
 
-unsigned char write_buffer[4096];
+static inline void sendbytes(uint8_t *b, uint32_t len)
+{
+    fwrite(b, len, 1, stdout);
+}
 
-void process(pio_spi_inst_t *spi, int command) {
-    switch(command) {
+static inline void process(pio_spi_inst_t *spi)
+{
+    static uint8_t buf[4096];
+
+    for (;;) {
+        switch(getchar()) {
         case S_CMD_NOP:
             putchar(S_ACK);
             break;
@@ -79,16 +88,13 @@ void process(pio_spi_inst_t *spi, int command) {
             break;
         case S_CMD_Q_CMDMAP:
             putchar(S_ACK);
-            putu32(S_CMD_MAP);
-
-            for(int i = 0; i < 32 - sizeof(uint32_t); i++) {
-                putchar(0);
-            }
+            memset(buf, 0, 32);
+            *(uint32_t *) buf = S_CMD_MAP;
+            sendbytes(buf, 32);
             break;
         case S_CMD_Q_PGMNAME:
             putchar(S_ACK);
             fwrite("pico-serprog\x0\x0\x0\x0\x0", 1, 16, stdout);
-            fflush(stdout);
             break;
         case S_CMD_Q_SERBUF:
             putchar(S_ACK);
@@ -115,23 +121,27 @@ void process(pio_spi_inst_t *spi, int command) {
             break;
         case S_CMD_O_SPIOP:
             {
-
                 uint32_t wlen = getu24();
                 uint32_t rlen = getu24();
 
                 cs_select(PIN_CS);
-                fread(write_buffer, 1, wlen, stdin);
-                pio_spi_write8_blocking(spi, write_buffer, wlen);
 
-                putchar(S_ACK);
-                char buf;
-                
-                for(uint32_t i = 0; i < rlen; i++)  {
-                    pio_spi_read8_blocking(spi, &buf, 1);
-                    putchar(buf);
+                while (wlen) {
+                    uint32_t cur = MIN(wlen, sizeof buf);
+                    readbytes(buf, cur);
+                    pio_spi_write8_blocking(spi, buf, cur);
+                    wlen -= cur;
                 }
 
-                
+                putchar(S_ACK);
+
+                while (rlen) {
+                    uint32_t cur = MIN(rlen, sizeof buf);
+                    pio_spi_read8_blocking(spi, buf, cur);
+                    sendbytes(buf, cur);
+                    rlen -= cur;
+                }
+
                 cs_deselect(PIN_CS);
             }
             break;
@@ -150,20 +160,19 @@ void process(pio_spi_inst_t *spi, int command) {
             break;
         default:
             putchar(S_NAK);
+        }
+        fflush(stdout);
     }
 }
 
 int main() {
     stdio_init_all();
-
     stdio_set_translate_crlf(&stdio_usb, false);
-
 
     // Initialize CS
     gpio_init(PIN_CS);
     gpio_put(PIN_CS, 1);
     gpio_set_dir(PIN_CS, GPIO_OUT);
-
 
     // We use PIO 1
     pio_spi_inst_t spi = {
@@ -176,18 +185,13 @@ int main() {
 
     pio_spi_init(spi.pio, spi.sm, offset,
                  8,       // 8 bits per SPI frame
-                 31.25f,  // 1 MHz @ 125 clk_sys
+                 2.5f,    // 12.5 MHz @ 125 clk_sys
                  false,   // CPHA = 0
                  false,   // CPOL = 0
                  PIN_SCK,
                  PIN_MOSI,
                  PIN_MISO);
 
-    // Command handling
-    while(1) {
-        int command = getchar();
-        process(&spi, command);
-    }
-
+    process(&spi);
     return 0;
 }
