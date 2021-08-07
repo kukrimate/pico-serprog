@@ -4,8 +4,6 @@
  * 
  * Licensed under GPLv3
  *
- * Based on the spi_flash pico-example, which is:
- *  Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
  * Also based on stm32-vserprog:
  *  https://github.com/dword1511/stm32-vserprog
  * 
@@ -14,30 +12,47 @@
 #include <stdio.h>
 #include <string.h>
 #include "pico/stdlib.h"
-#include "pio/pio_spi.h"
-#include "spi.h"
+#include "hardware/spi.h"
+#include "serprog.h"
 
-#define PIN_CS      2
-#define PIN_MISO    3
-#define PIN_MOSI    4
-#define PIN_SCK     5
+#define SPI_IF      spi0        // Which PL022 to use
+#define SPI_BAUD    12000000    // Default baudrate (12 MHz)
+#define SPI_CS      5
+#define SPI_MISO    4
+#define SPI_MOSI    3
+#define SPI_SCK     2
 
-#define S_SUPPORTED_BUS (1 << 3)    // BUS_SPI
+static void enable_spi(uint baud)
+{
+    // Setup chip select GPIO
+    gpio_init(SPI_CS);
+    gpio_put(SPI_CS, 1);
+    gpio_set_dir(SPI_CS, GPIO_OUT);
 
-#define S_CMD_MAP ( \
-  (1 << S_CMD_NOP)       | \
-  (1 << S_CMD_Q_IFACE)   | \
-  (1 << S_CMD_Q_CMDMAP)  | \
-  (1 << S_CMD_Q_PGMNAME) | \
-  (1 << S_CMD_Q_SERBUF)  | \
-  (1 << S_CMD_Q_BUSTYPE) | \
-  (1 << S_CMD_SYNCNOP)   | \
-  (1 << S_CMD_O_SPIOP)   | \
-  (1 << S_CMD_S_BUSTYPE) | \
-  (1 << S_CMD_S_SPI_FREQ)| \
-  (1 << S_CMD_S_PIN_STATE) \
-)
+    // Setup PL022
+    spi_init(SPI_IF, baud);
+    gpio_set_function(SPI_MISO, GPIO_FUNC_SPI);
+    gpio_set_function(SPI_MOSI, GPIO_FUNC_SPI);
+    gpio_set_function(SPI_SCK,  GPIO_FUNC_SPI);
+}
 
+static void disable_spi()
+{
+    // Set all pins to SIO inputs
+    gpio_init(SPI_CS);
+    gpio_init(SPI_MISO);
+    gpio_init(SPI_MOSI);
+    gpio_init(SPI_SCK);
+
+    // Disable all pulls
+    gpio_set_pulls(SPI_CS, 0, 0);
+    gpio_set_pulls(SPI_MISO, 0, 0);
+    gpio_set_pulls(SPI_MOSI, 0, 0);
+    gpio_set_pulls(SPI_SCK, 0, 0);
+
+    // Disable SPI peripheral
+    spi_deinit(SPI_IF);
+}
 
 static inline void cs_select(uint cs_pin)
 {
@@ -53,28 +68,19 @@ static inline void cs_deselect(uint cs_pin)
     asm volatile("nop \n nop \n nop"); // FIXME
 }
 
-static inline void readbytes(uint8_t *b, uint32_t len)
+static inline void readbytes(void *b, uint32_t len)
 {
     fread(b, len, 1, stdin);
 }
 
-static inline uint32_t getu24()
-{
-    uint8_t buf[3];
-    fread(buf, sizeof buf, 1, stdin);
-    return (uint32_t) buf[0]
-            | ((uint32_t) buf[1] << 8)
-            | ((uint32_t) buf[2] << 16);
-}
-
-static inline void sendbytes(uint8_t *b, uint32_t len)
+static inline void sendbytes(const void *b, uint32_t len)
 {
     fwrite(b, len, 1, stdout);
 }
 
-static inline void process(pio_spi_inst_t *spi)
+static void command_loop(void)
 {
-    static uint8_t buf[4096];
+    uint baud = spi_get_baudrate(SPI_IF);
 
     for (;;) {
         switch(getchar()) {
@@ -87,15 +93,33 @@ static inline void process(pio_spi_inst_t *spi)
             putchar(0x00);
             break;
         case S_CMD_Q_CMDMAP:
-            putchar(S_ACK);
-            memset(buf, 0, 32);
-            *(uint32_t *) buf = S_CMD_MAP;
-            sendbytes(buf, 32);
-            break;
+            {
+                static const uint32_t cmdmap[8] = {
+                    (1 << S_CMD_NOP)       |
+                      (1 << S_CMD_Q_IFACE)   |
+                      (1 << S_CMD_Q_CMDMAP)  |
+                      (1 << S_CMD_Q_PGMNAME) |
+                      (1 << S_CMD_Q_SERBUF)  |
+                      (1 << S_CMD_Q_BUSTYPE) |
+                      (1 << S_CMD_SYNCNOP)   |
+                      (1 << S_CMD_O_SPIOP)   |
+                      (1 << S_CMD_S_BUSTYPE) |
+                      (1 << S_CMD_S_SPI_FREQ)|
+                      (1 << S_CMD_S_PIN_STATE)
+                };
+
+                putchar(S_ACK);
+                sendbytes((uint8_t *) cmdmap, sizeof cmdmap);
+                break;
+            }
         case S_CMD_Q_PGMNAME:
-            putchar(S_ACK);
-            fwrite("pico-serprog\x0\x0\x0\x0\x0", 1, 16, stdout);
-            break;
+            {
+                static const char progname[16] = "pico-serprog";
+
+                putchar(S_ACK);
+                sendbytes(progname, sizeof progname);
+                break;
+            }
         case S_CMD_Q_SERBUF:
             putchar(S_ACK);
             putchar(0xFF);
@@ -103,33 +127,34 @@ static inline void process(pio_spi_inst_t *spi)
             break;
         case S_CMD_Q_BUSTYPE:
             putchar(S_ACK);
-            putchar(S_SUPPORTED_BUS);
+            putchar((1 << 3)); // BUS_SPI
             break;
         case S_CMD_SYNCNOP:
             putchar(S_NAK);
             putchar(S_ACK);
             break;
         case S_CMD_S_BUSTYPE:
-            {
-                int bustype = getchar();
-                if((bustype | S_SUPPORTED_BUS) == S_SUPPORTED_BUS) {
-                    putchar(S_ACK);
-                } else {
-                    putchar(S_NAK);
-                }
-            }
+            // If SPI is among the requsted bus types we succeed, fail otherwise
+            if((uint8_t) getchar() & (1 << 3))
+                putchar(S_ACK);
+            else
+                putchar(S_NAK);
             break;
         case S_CMD_O_SPIOP:
             {
-                uint32_t wlen = getu24();
-                uint32_t rlen = getu24();
+                static uint8_t buf[4096];
 
-                cs_select(PIN_CS);
+                uint32_t wlen = 0;
+                readbytes(&wlen, 3);
+                uint32_t rlen = 0;
+                readbytes(&rlen, 3);
+
+                cs_select(SPI_CS);
 
                 while (wlen) {
                     uint32_t cur = MIN(wlen, sizeof buf);
                     readbytes(buf, cur);
-                    pio_spi_write8_blocking(spi, buf, cur);
+                    spi_write_blocking(SPI_IF, buf, cur);
                     wlen -= cur;
                 }
 
@@ -137,61 +162,49 @@ static inline void process(pio_spi_inst_t *spi)
 
                 while (rlen) {
                     uint32_t cur = MIN(rlen, sizeof buf);
-                    pio_spi_read8_blocking(spi, buf, cur);
+                    spi_read_blocking(SPI_IF, 0, buf, cur);
                     sendbytes(buf, cur);
                     rlen -= cur;
                 }
 
-                cs_deselect(PIN_CS);
+                cs_deselect(SPI_CS);
             }
             break;
         case S_CMD_S_SPI_FREQ:
-            // TODO
-            putchar(S_ACK);
-            putchar(0x0);
-            putchar(0x40);
-            putchar(0x0);
-            putchar(0x0);
-            break;
+            {
+                uint32_t want_baud;
+                readbytes(&want_baud, 4);
+                if (want_baud) {
+                    // Set frequence
+                    baud = spi_set_baudrate(SPI_IF, want_baud);
+                    // Send back actual value
+                    putchar(S_ACK);
+                    sendbytes(&baud, 4);
+                } else {
+                    // 0 Hz is reserved
+                    putchar(S_NAK);
+                }
+                break;
+            }
         case S_CMD_S_PIN_STATE:
-            //TODO:
-            getchar();
+            if (getchar())
+                enable_spi(baud);
+            else
+                disable_spi();
             putchar(S_ACK);
             break;
         default:
             putchar(S_NAK);
+            break;
         }
         fflush(stdout);
     }
 }
 
-int main() {
+int main()
+{
     stdio_init_all();
     stdio_set_translate_crlf(&stdio_usb, false);
-
-    // Initialize CS
-    gpio_init(PIN_CS);
-    gpio_put(PIN_CS, 1);
-    gpio_set_dir(PIN_CS, GPIO_OUT);
-
-    // We use PIO 1
-    pio_spi_inst_t spi = {
-            .pio = pio1,
-            .sm = 0,
-            .cs_pin = PIN_CS
-    };
-
-    uint offset = pio_add_program(spi.pio, &spi_cpha0_program);
-
-    pio_spi_init(spi.pio, spi.sm, offset,
-                 8,       // 8 bits per SPI frame
-                 2.5f,    // 12.5 MHz @ 125 clk_sys
-                 false,   // CPHA = 0
-                 false,   // CPOL = 0
-                 PIN_SCK,
-                 PIN_MOSI,
-                 PIN_MISO);
-
-    process(&spi);
-    return 0;
+    enable_spi(SPI_BAUD);
+    command_loop();
 }

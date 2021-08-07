@@ -1,6 +1,10 @@
+#ifndef SERPROG_H
+#define SERPROG_H
+
 /* According to Serial Flasher Protocol Specification - version 1 */
 #define S_ACK 0x06
 #define S_NAK 0x15
+
 #define S_CMD_NOP		0x00	/* No operation					*/
 #define S_CMD_Q_IFACE		0x01	/* Query interface version			*/
 #define S_CMD_Q_CMDMAP		0x02	/* Query supported commands bitmap		*/
@@ -23,3 +27,5 @@
 #define S_CMD_O_SPIOP		0x13	/* Perform SPI operation.			*/
 #define S_CMD_S_SPI_FREQ	0x14	/* Set SPI clock frequency			*/
 #define S_CMD_S_PIN_STATE	0x15	/* Enable/disable output drivers		*/
+
+#endif

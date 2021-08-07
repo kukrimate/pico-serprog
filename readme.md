@@ -7,10 +7,10 @@ possibly other RP2040 based boards. Based on pico-serprog by GitHub user
 Pinout for the SPI lines:
 | Pin | Function |
 |-----|----------|
-| GP2 | CS       |
-| GP3 | MISO     |
-| GP4 | MOSI     |
-| GP5 | SCK      |
+| GP5 | CS       |
+| GP4 | MISO     |
+| GP3 | MOSI     |
+| GP2 | SCK      |
 
 ## Example
 
@@ -19,18 +19,15 @@ Substitute ttyACMx with the actual tty device corresponding to the firmware.
 Read chip:
 
 ```
-flashrom -p serprog:dev=/dev/ttyACMx:1000000 -r flash.bin
+flashrom -p serprog:dev=/dev/ttyACMx -r flash.bin
 ```
 
 Write chip:
 ```
-flashrom -p serprog:dev=/dev/ttyACMx:1000000 -w flash.bin
+flashrom -p serprog:dev=/dev/ttyACMx -w flash.bin
 ```
 
 ## License
-
-The project is based on the spi_flash example by Raspberry Pi (Trading) Ltd.
-which is licensed under BSD-3-Clause.
 
 As a lot of the code itself was heavily inspired/influenced by `stm32-vserprog`
 this code is licensed under GPLv3.
