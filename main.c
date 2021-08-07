@@ -9,11 +9,12 @@
  * 
  */
 
-#include <stdio.h>
-#include <string.h>
 #include "pico/stdlib.h"
 #include "hardware/spi.h"
+#include "tusb.h"
 #include "serprog.h"
+
+#define CDC_ITF     0           // USB CDC interface no
 
 #define SPI_IF      spi0        // Which PL022 to use
 #define SPI_BAUD    12000000    // Default baudrate (12 MHz)
@@ -68,14 +69,52 @@ static inline void cs_deselect(uint cs_pin)
     asm volatile("nop \n nop \n nop"); // FIXME
 }
 
-static inline void readbytes(void *b, uint32_t len)
+static void wait_for_read(void)
 {
-    fread(b, len, 1, stdin);
+    do
+        tud_task();
+    while (!tud_cdc_n_available(CDC_ITF));
 }
 
-static inline void sendbytes(const void *b, uint32_t len)
+static inline void readbytes_blocking(void *b, uint32_t len)
 {
-    fwrite(b, len, 1, stdout);
+    while (len) {
+        wait_for_read();
+        uint32_t r = tud_cdc_n_read(CDC_ITF, b, len);
+        b += r;
+        len -= r;
+    }
+}
+
+static inline uint8_t readbyte_blocking(void)
+{
+    wait_for_read();
+    uint8_t b;
+    tud_cdc_n_read(CDC_ITF, &b, 1);
+    return b;
+}
+
+static void wait_for_write(void)
+{
+    do {
+        tud_task();
+    } while (!tud_cdc_n_write_available(CDC_ITF));
+}
+
+static inline void sendbytes_blocking(const void *b, uint32_t len)
+{
+    while (len) {
+        wait_for_write();
+        uint32_t w = tud_cdc_n_write(CDC_ITF, b, len);
+        b += w;
+        len -= w;
+    }
+}
+
+static inline void sendbyte_blocking(uint8_t b)
+{
+    wait_for_write();
+    tud_cdc_n_write(CDC_ITF, &b, 1);
 }
 
 static void command_loop(void)
@@ -83,14 +122,14 @@ static void command_loop(void)
     uint baud = spi_get_baudrate(SPI_IF);
 
     for (;;) {
-        switch(getchar()) {
+        switch (readbyte_blocking()) {
         case S_CMD_NOP:
-            putchar(S_ACK);
+            sendbyte_blocking(S_ACK);
             break;
         case S_CMD_Q_IFACE:
-            putchar(S_ACK);
-            putchar(0x01);
-            putchar(0x00);
+            sendbyte_blocking(S_ACK);
+            sendbyte_blocking(0x01);
+            sendbyte_blocking(0x00);
             break;
         case S_CMD_Q_CMDMAP:
             {
@@ -108,62 +147,62 @@ static void command_loop(void)
                       (1 << S_CMD_S_PIN_STATE)
                 };
 
-                putchar(S_ACK);
-                sendbytes((uint8_t *) cmdmap, sizeof cmdmap);
+                sendbyte_blocking(S_ACK);
+                sendbytes_blocking((uint8_t *) cmdmap, sizeof cmdmap);
                 break;
             }
         case S_CMD_Q_PGMNAME:
             {
                 static const char progname[16] = "pico-serprog";
 
-                putchar(S_ACK);
-                sendbytes(progname, sizeof progname);
+                sendbyte_blocking(S_ACK);
+                sendbytes_blocking(progname, sizeof progname);
                 break;
             }
         case S_CMD_Q_SERBUF:
-            putchar(S_ACK);
-            putchar(0xFF);
-            putchar(0xFF);
+            sendbyte_blocking(S_ACK);
+            sendbyte_blocking(0xFF);
+            sendbyte_blocking(0xFF);
             break;
         case S_CMD_Q_BUSTYPE:
-            putchar(S_ACK);
-            putchar((1 << 3)); // BUS_SPI
+            sendbyte_blocking(S_ACK);
+            sendbyte_blocking((1 << 3)); // BUS_SPI
             break;
         case S_CMD_SYNCNOP:
-            putchar(S_NAK);
-            putchar(S_ACK);
+            sendbyte_blocking(S_NAK);
+            sendbyte_blocking(S_ACK);
             break;
         case S_CMD_S_BUSTYPE:
             // If SPI is among the requsted bus types we succeed, fail otherwise
-            if((uint8_t) getchar() & (1 << 3))
-                putchar(S_ACK);
+            if((uint8_t) readbyte_blocking() & (1 << 3))
+                sendbyte_blocking(S_ACK);
             else
-                putchar(S_NAK);
+                sendbyte_blocking(S_NAK);
             break;
         case S_CMD_O_SPIOP:
             {
                 static uint8_t buf[4096];
 
                 uint32_t wlen = 0;
-                readbytes(&wlen, 3);
+                readbytes_blocking(&wlen, 3);
                 uint32_t rlen = 0;
-                readbytes(&rlen, 3);
+                readbytes_blocking(&rlen, 3);
 
                 cs_select(SPI_CS);
 
                 while (wlen) {
                     uint32_t cur = MIN(wlen, sizeof buf);
-                    readbytes(buf, cur);
+                    readbytes_blocking(buf, cur);
                     spi_write_blocking(SPI_IF, buf, cur);
                     wlen -= cur;
                 }
 
-                putchar(S_ACK);
+                sendbyte_blocking(S_ACK);
 
                 while (rlen) {
                     uint32_t cur = MIN(rlen, sizeof buf);
                     spi_read_blocking(SPI_IF, 0, buf, cur);
-                    sendbytes(buf, cur);
+                    sendbytes_blocking(buf, cur);
                     rlen -= cur;
                 }
 
@@ -173,38 +212,41 @@ static void command_loop(void)
         case S_CMD_S_SPI_FREQ:
             {
                 uint32_t want_baud;
-                readbytes(&want_baud, 4);
+                readbytes_blocking(&want_baud, 4);
                 if (want_baud) {
                     // Set frequence
                     baud = spi_set_baudrate(SPI_IF, want_baud);
                     // Send back actual value
-                    putchar(S_ACK);
-                    sendbytes(&baud, 4);
+                    sendbyte_blocking(S_ACK);
+                    sendbytes_blocking(&baud, 4);
                 } else {
                     // 0 Hz is reserved
-                    putchar(S_NAK);
+                    sendbyte_blocking(S_NAK);
                 }
                 break;
             }
         case S_CMD_S_PIN_STATE:
-            if (getchar())
+            if (readbyte_blocking())
                 enable_spi(baud);
             else
                 disable_spi();
-            putchar(S_ACK);
+            sendbyte_blocking(S_ACK);
             break;
         default:
-            putchar(S_NAK);
+            sendbyte_blocking(S_NAK);
             break;
         }
-        fflush(stdout);
+
+        tud_cdc_n_write_flush(CDC_ITF);
     }
 }
 
 int main()
 {
-    stdio_init_all();
-    stdio_set_translate_crlf(&stdio_usb, false);
+    // Setup USB
+    tusb_init();
+    // Setup PL022 SPI
     enable_spi(SPI_BAUD);
+
     command_loop();
 }
