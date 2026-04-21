@@ -94,6 +94,11 @@
 #define CFG_TUD_ENDPOINT0_SIZE    64
 #endif
 
+// Disable the RP2040 USB Errata 15 (a.k.a. uframe) workaround. It works around
+// corrupt-ACK babble when the device is plugged into the USB 2.0 hub inside a
+// Raspberry Pi 4 / 400, at a cost of ~20% of Bulk IN bandwidth.
+#define TUD_OPT_RP2040_USB_DEVICE_UFRAME_FIX 0
+
 //------------- CLASS -------------//
 #define CFG_TUD_CDC               1
 #define CFG_TUD_MSC               0
